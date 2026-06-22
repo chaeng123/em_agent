@@ -36,6 +36,61 @@ DEPARTMENT_CODES = {
     "치과": "D034",
 }
 
+# 세부 진료과·별칭 → 위 DEPARTMENT_CODES의 표준 진료과명으로 정규화
+#   (병·의원 찾기 API의 QD 코드는 큰 단위 진료과만 지원하므로,
+#    소화기내과·심장내과 같은 세부 분과는 상위 과로 매핑)
+DEPARTMENT_ALIASES = {
+    # 내과 세부 분과
+    "소화기내과": "내과", "호흡기내과": "내과", "순환기내과": "내과", "심장내과": "내과",
+    "심장혈관내과": "내과", "신장내과": "내과", "콩팥내과": "내과", "내분비내과": "내과",
+    "류마티스내과": "내과", "감염내과": "내과", "혈액종양내과": "내과", "종양내과": "내과",
+    "혈액내과": "내과", "알레르기내과": "내과", "소화기": "내과", "호흡기": "내과",
+    "순환기": "내과",
+    # 외과 세부 분과
+    "일반외과": "외과", "대장항문외과": "외과", "간담췌외과": "외과", "위장관외과": "외과",
+    "유방외과": "외과", "혈관외과": "외과",
+    # 명칭 변형/구명칭
+    "정신과": "정신건강의학과", "신경정신과": "정신건강의학과",
+    "비뇨기과": "비뇨의학과",
+    "소아과": "소아청소년과",
+    "산과": "산부인과", "부인과": "산부인과", "여성의학과": "산부인과",
+    "이비인후": "이비인후과", "ent": "이비인후과",
+    "가정의학": "가정의학과", "가정의": "가정의학과",
+    "재활의학": "재활의학과", "재활": "재활의학과",
+    "응급의학": "응급의학과", "응급실": "응급의학과", "응급": "응급의학과",
+    "정형": "정형외과",
+}
+
+# 사용자/Agent에게 안내할 지원 진료과 목록
+SUPPORTED_DEPARTMENTS = list(DEPARTMENT_CODES.keys())
+
+
+def resolve_department(name: str):
+    """진료과 입력을 (표준 진료과명, QD코드)로 정규화.
+    1) 표준명 직접 매칭 → 2) 별칭/세부분과 매핑 → 3) 가장 긴 부분일치.
+    매핑 불가 시 None 반환(호출부에서 지원 목록 안내)."""
+    if not name:
+        return None
+    n = name.strip()
+    if n in DEPARTMENT_CODES:
+        return n, DEPARTMENT_CODES[n]
+    canon = DEPARTMENT_ALIASES.get(n) or DEPARTMENT_ALIASES.get(n.lower())
+    if canon and canon in DEPARTMENT_CODES:
+        return canon, DEPARTMENT_CODES[canon]
+    # 부분일치: "신경외과센터"가 "외과"로 잘못 잡히지 않도록 가장 긴 키 우선
+    cands = [d for d in DEPARTMENT_CODES if d in n]
+    if cands:
+        best = max(cands, key=len)
+        return best, DEPARTMENT_CODES[best]
+    # 별칭의 부분일치도 시도 (예: "소화기내과 진료")
+    acands = [a for a in DEPARTMENT_ALIASES if a in n]
+    if acands:
+        best = max(acands, key=len)
+        canon = DEPARTMENT_ALIASES[best]
+        if canon in DEPARTMENT_CODES:
+            return canon, DEPARTMENT_CODES[canon]
+    return None
+
 # ---------------------------------------------------------------------------
 # 위급 신호: 발견 시 예측보다 우선해 "즉시 병원/119" 안내
 # ---------------------------------------------------------------------------

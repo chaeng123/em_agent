@@ -301,11 +301,11 @@ def predict_conditions(
 # ===========================================================================
 # 툴 3) 근처 병·의원 찾기 (공공데이터포털 - 병·의원 찾기 서비스)
 # ===========================================================================
-async def _fetch_xml(url: str, params: dict):
-    async with httpx.AsyncClient(timeout=10.0) as client:
+async def _fetch_text(url: str, params: dict):
+    """요청을 보내고 (status_code, 응답본문)을 반환. 상태코드 검사는 호출부에서."""
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        return ET.fromstring(resp.text)
+        return resp.status_code, resp.text
 
 
 @mcp.tool(
@@ -324,10 +324,15 @@ async def find_nearby_hospital(
     해당 진료과로 필터링합니다. 실시간 공공데이터이므로 호출 시점에 따라 결과가 달라질
     수 있습니다.
 
+    department에는 큰 단위 진료과명을 권장합니다(내과·외과·정형외과·이비인후과 등).
+    소화기내과·심장내과 같은 세부 분과나 '정신과'·'비뇨기과' 같은 구명칭을 넣으면
+    상위 표준 진료과로 자동 변환됩니다. 변환할 수 없는 이름이면 지원 진료과 목록을
+    안내하며, 진료과 없이 호출하면 지역 내 병·의원 전체를 조회합니다.
+
     Args:
         sido: 시도 (예: "서울특별시")
         sigungu: 시군구 (예: "강남구")
-        department: 진료과 (예: "내과", "이비인후과", "정형외과" 등; 생략 가능)
+        department: 진료과 (예: "내과", "소화기내과"→내과, "정신과"→정신건강의학과; 생략 가능)
     """
     if not SERVICE_KEY:
         return ("  (병원 조회 불가: 서비스 인증키 미설정 — 환경변수 DATA_GO_KR_SERVICE_KEY "
@@ -335,22 +340,60 @@ async def find_nearby_hospital(
 
     params = {"serviceKey": SERVICE_KEY, "Q0": sido, "Q1": sigungu,
               "pageNo": "1", "numOfRows": "10"}
-    dept_code = kb.DEPARTMENT_CODES.get(department.strip()) if department else None
-    if dept_code:
+
+    # 진료과 정규화: 세부 분과(소화기내과 등)는 상위 과로, 매핑 불가 시 안내 후 종료
+    dept_canon = None
+    dept_code = None
+    if department and department.strip():
+        resolved = kb.resolve_department(department)
+        if not resolved:
+            supported = ", ".join(kb.SUPPORTED_DEPARTMENTS)
+            return (f"  ('{department}'은(는) 이 검색에서 지원하지 않는 진료과명이에요.)\n"
+                    f"  지원 진료과: {supported}\n"
+                    f"  (세부 분과는 상위 과로 입력하세요. 예: 소화기내과·심장내과 → 내과)\n"
+                    f"  진료과 없이도 지역 병·의원 전체를 조회할 수 있습니다.\n\n{SAFETY}")
+        dept_canon, dept_code = resolved
         params["QD"] = dept_code
 
     try:
-        root = await _fetch_xml(f"{HOSP_BASE}/getHsptlMdcncListInfoInqire", params)
+        status, body = await _fetch_text(f"{HOSP_BASE}/getHsptlMdcncListInfoInqire", params)
     except Exception as e:
-        return f"  (병원 조회 오류: {e})\n\n{SAFETY}"
+        # str(e)가 비어 있는 예외도 있어 type/repr까지 노출해 진단을 돕는다
+        return f"  (병원 조회 연결 오류: {type(e).__name__}: {e!r})\n\n{SAFETY}"
+
+    # HTTP 상태 비정상이면 본문 일부를 함께 보여 원인 파악을 돕는다
+    if status != 200:
+        snippet = (body or "").strip().replace("\n", " ")[:300]
+        return f"  (병원 API HTTP {status} 응답)\n  본문: {snippet}\n\n{SAFETY}"
+
+    # XML 파싱 시도 — 실패하면 본문 일부 노출(데이터포털은 인증오류를 본문에 담아줌)
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as e:
+        snippet = (body or "").strip().replace("\n", " ")[:300]
+        return (f"  (병원 API 응답 파싱 실패: {e})\n  본문: {snippet}\n\n{SAFETY}")
+
+    # 데이터포털 인증/오류 메시지(returnAuthMsg / returnReasonCode / resultMsg) 처리
+    auth_msg = root.findtext(".//returnAuthMsg")
+    reason = root.findtext(".//returnReasonCode")
+    if auth_msg or (reason and reason not in ("00", "0")):
+        return (f"  (병원 API 인증/요청 오류: {auth_msg or ''} "
+                f"코드 {reason or '?'})\n"
+                f"  → data.go.kr에서 해당 서비스 활용신청 승인·키 종류(Decoding) 확인 필요\n\n{SAFETY}")
 
     code = root.findtext(".//resultCode")
     if code and code != "00":
         msg = root.findtext(".//resultMsg") or ""
         return f"  (병원 API 오류 코드 {code} {msg})\n\n{SAFETY}"
 
+    # 입력이 정규화됐으면(예: 소화기내과→내과) 라벨에 그 사실을 표시
+    if dept_canon and department.strip() != dept_canon:
+        dept_filter_label = f"{dept_canon}(입력: {department.strip()})"
+    else:
+        dept_filter_label = dept_canon or ""
+    dept_label = f" · {dept_canon}" if dept_code else ""
+
     items = root.findall(".//item")
-    dept_label = f" · {department}" if dept_code else ""
     if not items:
         return (f"  ('{sido} {sigungu}{dept_label}' 조건의 병·의원 조회 결과 없음)\n"
                 f"  (진료과를 바꾸거나 지역을 넓혀 다시 시도하세요.)\n\n{SAFETY}")
@@ -364,7 +407,7 @@ async def find_nearby_hospital(
         div_label = f"[{div}] " if div else ""
         out.append(f"  • {div_label}{name}\n     {addr} | ☎ {tel}")
     if dept_code:
-        out.append(f"\n  (진료과 필터: {department})")
+        out.append(f"\n  (진료과 필터: {dept_filter_label})")
     out += ["", SAFETY]
     return "\n".join(out)
 
