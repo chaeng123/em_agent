@@ -245,31 +245,50 @@ def predict_conditions(
     emergency = kb.detect_emergency(combined)
     matched = kb.match_conditions(combined)
 
-    out = ["【예상 질환 및 담당 진료과 (참고용)】", ""]
+    # --- 문진 요약: 환자가 말한 내용을 먼저 되짚어 줌 ---
+    out = ["【문진 요약】"]
+    out.append(f"  - 말씀하신 주요 증상: {chief_complaint}")
+    if symptoms:
+        out.append(f"  - 함께 있는 증상: {symptoms}")
+    if history:
+        out.append(f"  - 과거력/복용약: {history}")
+    out.append("")
+
+    out += ["【예상 질환 및 담당 진료과 (참고용)】", ""]
     if emergency:
         out += [kb.EMERGENCY_GUIDANCE, ""]
 
     if not matched:
         out += [
-            "- 입력 소견에서 특정 질환 패턴을 식별하지 못했습니다.",
-            "- 증상을 더 구체적으로 입력하거나, 일반적으로는 가정의학과/내과에서 초기 진료가 가능합니다.",
+            "- 말씀하신 내용만으로는 특정 질환 패턴을 콕 집기 어려웠어요.",
+            "- 증상을 조금 더 자세히 알려주시거나, 일반적으로는 가정의학과/내과에서 초기 진료가 가능합니다.",
             "", SAFETY,
         ]
         return "\n".join(out)
 
-    out.append("■ 예상 질환 후보 (관련도 높은 순):")
-    primary_depts = []
-    for cid, hits in matched[:5]:
-        c = kb.CONDITIONS[cid]
-        depts = c["department"] + (f" (또는 {', '.join(c['alt_depts'])})" if c["alt_depts"] else "")
-        out.append(f"  • {c['name']}")
-        out.append(f"     - 담당 진료과: {depts}")
-        out.append(f"     - 권장: {kb.URGENCY_LABEL[c['urgency']]}")
-        out.append(f"     - 뒷받침 소견: {', '.join(c['supporting'][:4])}")
-        if c.get("extra_note"):
-            out.append(f"     - 참고: {c['extra_note']}")
-        if c["department"] not in primary_depts:
-            primary_depts.append(c["department"])
+    # 가장 관련도 높은 후보를 한 줄 결론으로 먼저 제시
+    top = kb.CONDITIONS[matched[0][0]]
+    top_dept = top["department"] + (f"(또는 {', '.join(top['alt_depts'])})" if top["alt_depts"] else "")
+    out.append(f"■ 가장 가능성 있는 방향: '{top['name']}'이(가) 의심되어 "
+               f"{top_dept} 진료를 권합니다.")
+    out.append(f"  - 권장 시급성: {kb.URGENCY_LABEL[top['urgency']]}")
+    out.append(f"  - 그렇게 본 이유(뒷받침 소견): {', '.join(top['supporting'][:4])}")
+    if top.get("extra_note"):
+        out.append(f"  - 참고: {top['extra_note']}")
+    out.append("")
+
+    out.append("■ 그 외 함께 고려할 수 있는 후보:")
+    primary_depts = [top["department"]]
+    others = matched[1:5]
+    if others:
+        for cid, hits in others:
+            c = kb.CONDITIONS[cid]
+            depts = c["department"] + (f" (또는 {', '.join(c['alt_depts'])})" if c["alt_depts"] else "")
+            out.append(f"  • {c['name']} — {depts} / {kb.URGENCY_LABEL[c['urgency']]}")
+            if c["department"] not in primary_depts:
+                primary_depts.append(c["department"])
+    else:
+        out.append("  • (추가 후보 없음)")
 
     out += ["",
             f"■ 추천 진료과: {', '.join(primary_depts)}",
