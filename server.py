@@ -57,6 +57,13 @@ AGENT_INSTRUCTIONS = """Health_Navigator 사용 지침 (에이전트용):
 3) 표준 흐름: (건강기록 있으면) import_health_record → intake_questions 로 문진 →
    structure_intake → predict_conditions(profile=...) → find_nearby_hospital /
    self_care_guidance → generate_clinician_handoff.
+3-1) [문진 결과 자동 정리] 문진 답변이 어느 정도 모였거나 사용자가 "다 됐어/이제
+   됐어" 같은 신호를 주면, 사용자가 따로 요청하지 않아도 자동으로 structure_intake 를
+   호출해 정리된 '문진 결과'를 사용자에게 보기 쉽게 요약해 보여주세요. 그런 다음 곧바로
+   predict_conditions 를 호출해 예상 질환·담당 진료과·시급성까지 이어서 안내하세요.
+   단계마다 "정리해 드릴까요?"라고 되묻지 말고, 위급 신호가 없으면 자연스럽게 문진 정리
+   → 예측까지 한 흐름으로 진행하세요. (근처 병원·자가처치·인계 요약은 그 뒤에 사용자
+   의향을 물어 제공)
 4) 의식저하·심한 출혈·갑작스러운 마비나 언어장애·심한 흉통·호흡곤란 등 위급 신호가
    보이면 문진·예측보다 먼저 즉시 119·응급실을 안내하세요.
 5) 모든 안내는 일반 참고용이며 의학적 확정 진단이 아닙니다. 개인 건강기록은 응답
@@ -268,8 +275,10 @@ def intake_questions(complaint: str) -> str:
                "  • 발병 시점/양상(언제부터, 갑자기/서서히, 호전·악화)",
                "  • 증상의 성상(부위·강도·지속시간·동반 증상)",
                "  • 관련 위험 증상(발열·출혈·호흡곤란·의식변화 등)",
-               "  • 과거력·수술력·복용 약물·알레르기",
-               "  • 활력징후(측정 가능하면)"]
+               "  • 활력징후(측정 가능하면)",
+               "",
+               "■ 공통 기본 문진 (꼭 함께 확인):"]
+        out += [f"  • {x}" for x in kb.COMMON_BASELINE]
         if emergency:
             out += ["", kb.EMERGENCY_GUIDANCE]
         out += ["", SAFETY]
@@ -290,6 +299,9 @@ def intake_questions(complaint: str) -> str:
     out += [f"  • {x}" for x in q["phx_meds"]]
     out.append("")
     out.append(f"■ 진찰 초점(의료진용): {', '.join(q['exam_focus'])}")
+    out.append("")
+    out.append("■ 공통 기본 문진 (주호소와 별개로 꼭 함께 확인):")
+    out += [f"  • {x}" for x in kb.COMMON_BASELINE]
     out.append("")
     out.append(f"⚠️ 위험징후(있으면 즉시 응급실 안내): {', '.join(q['red_flags'])}")
 
@@ -340,9 +352,10 @@ def predict_conditions(
     emergency = kb.detect_emergency(combined)
     matched = kb.match_conditions(combined)
 
-    # --- 개인 건강기록 반영: 프로파일이 있으면 위험 가중 계산 ---
-    flags = kb.parse_health_record(profile) if profile and profile.strip() else None
-    # 프로파일 매칭에 증상 텍스트를 함께 넘겨 기저질환×증상 규칙을 평가
+    # --- 개인 건강기록 반영: 프로파일 + 대화 중 언급한 과거력을 함께 파싱 ---
+    #   정식 프로파일이 없어도, 문진에서 말한 기저질환(예: 천식)을 위험 가중에 반영.
+    risk_source = " ".join([s for s in [profile, history] if s and s.strip()])
+    flags = kb.parse_health_record(risk_source) if risk_source.strip() else None
     risk = kb.assess_risk(flags, combined) if flags else {"notes": [], "boosted": {}, "added": []}
 
     def urgency_of(cid):
@@ -355,7 +368,7 @@ def predict_conditions(
         out.append(f"  - 함께 있는 증상: {symptoms}")
     if history:
         out.append(f"  - 과거력/복용약: {history}")
-    if flags:
+    if profile and profile.strip():
         out.append(f"  - 개인 건강기록: {profile.strip()}")
     out.append("")
 
