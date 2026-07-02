@@ -91,7 +91,7 @@ def _kdca_link(term: str) -> str:
     )
 )
 def import_health_record(record_text: str) -> str:
-    """Health_Navigator: 사용자가 '나의건강기록' 앱이나 정부24 등에서 직접 내보낸
+    """Health_Navigator [v5.3 (2026-07-02)]: 사용자가 '나의건강기록' 앱이나 정부24 등에서 직접 내보낸
     본인의 진료·투약·건강검진 기록(텍스트/PDF에서 추출한 내용)을 받아, 복용약
     계열·기저질환·주요 검사수치·알레르기를 추출한 '개인 건강 프로파일'을 만듭니다.
 
@@ -159,7 +159,7 @@ def structure_intake(
     assessment: str = "",
     plan: str = "",
 ) -> str:
-    """Health_Navigator: 인턴의 ER 초진 기록을 받아 표준 초진일지 양식
+    """Health_Navigator [v5.3 (2026-07-02)]: 인턴의 ER 초진 기록을 받아 표준 초진일지 양식
     (SOAP 기반 + ROS / PE / Assessment(r/o) / Plan)으로 정리해 반환합니다.
     이후 predict_conditions / find_nearby_hospital / self_care_guidance 툴의
     입력으로 사용할 수 있습니다. 진단이 아닌 기록 정리 단계입니다.
@@ -244,7 +244,7 @@ def structure_intake(
     )
 )
 def intake_questions(complaint: str) -> str:
-    """Health_Navigator: 환자가 증상(주호소)을 말하면, 그 주호소에 맞춰 환자에게
+    """Health_Navigator [v5.3 (2026-07-02)]: 환자가 증상(주호소)을 말하면, 그 주호소에 맞춰 환자에게
     물어봐야 할 문진 질문 목록을 돌려줍니다. structure_intake로 기록을 정리하기
     '전' 단계에서 사용하세요. 반환된 질문을 환자에게 한 번에 1~2개씩 자연스럽게
     물어 답을 모은 뒤 structure_intake의 각 슬롯(onset/symptoms/ros/history 등)에
@@ -332,7 +332,7 @@ def predict_conditions(
     history: str = "",
     profile: str = "",
 ) -> str:
-    """Health_Navigator: 초진 소견(주호소·증상·과거력)을 내장 지식베이스와 대조해
+    """Health_Navigator [v5.3 (2026-07-02)]: 초진 소견(주호소·증상·과거력)을 내장 지식베이스와 대조해
     예상되는 질환 후보와 각 질환의 담당 진료과, 권장 진료 시급성을 안내합니다.
     확정 진단이 아니며, 근처 병원은 find_nearby_hospital, 방문 전 처치는
     self_care_guidance 툴로 이어서 확인하세요.
@@ -465,7 +465,7 @@ async def find_nearby_hospital(
     sigungu: str,
     department: str = "",
 ) -> str:
-    """Health_Navigator: 지정한 지역(시도/시군구)에서 진료과 기준으로 근처 병·의원을
+    """Health_Navigator [v5.3 (2026-07-02)]: 지정한 지역(시도/시군구)에서 진료과 기준으로 근처 병·의원을
     국립중앙의료원 공공데이터(병·의원 찾기 서비스)로 조회합니다. department를 지정하면
     해당 진료과로 필터링합니다. 실시간 공공데이터이므로 호출 시점에 따라 결과가 달라질
     수 있습니다.
@@ -568,7 +568,7 @@ async def find_nearby_hospital(
     )
 )
 def self_care_guidance(query: str) -> str:
-    """Health_Navigator: 질환명 또는 증상을 입력하면, 병원 방문 전 시행할 수 있는
+    """Health_Navigator [v5.3 (2026-07-02)]: 질환명 또는 증상을 입력하면, 병원 방문 전 시행할 수 있는
     일반적인 자가 처치 안내와 주의할 위험징후를 제공하고, 해당 질환의 질병관리청
     국가건강정보포털 공식 콘텐츠 링크(출처표시)를 함께 안내합니다. 처치 안내는 일반
     참고용이며, 공식 원문은 제공된 포털 링크에서 확인하세요.
@@ -643,7 +643,7 @@ def generate_clinician_handoff(
     urgency: str = "",
     plan: str = "",
 ) -> str:
-    """Health_Navigator: 지금까지 모은 문진 내용과 개인 건강기록(profile)을 합쳐,
+    """Health_Navigator [v5.3 (2026-07-02)]: 지금까지 모은 문진 내용과 개인 건강기록(profile)을 합쳐,
     환자가 '진료 시 의사에게 그대로 보여줄 수 있는' 한 장짜리 사전 초진 요약(문진표)을
     만듭니다. 환자용 안내가 아니라 의료진 인계용 산출물이라는 점이 일반 증상 안내와
     구분되는 지점입니다. 환자 진술과 본인 제공 기록에 기반하며 확정 진단이 아닙니다.
