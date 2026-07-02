@@ -39,7 +39,31 @@ HOSP_BASE = "http://apis.data.go.kr/B552657/HsptlAsembySearchService"
 KDCA_PORTAL = "https://health.kdca.go.kr"
 
 PORT = int(os.environ.get("PORT", "8000"))
-mcp = FastMCP("Health_Navigator", host="0.0.0.0", port=PORT)
+
+# MCP initialize 시 호스트(에이전트)에 전달되는 사용 지침.
+#   호스트가 이 instructions를 시스템 프롬프트에 반영하므로, 여기서 '먼저 건강기록
+#   연동을 제안하라'는 행동을 명시해 에이전트가 능동적으로 묻게 유도한다.
+AGENT_INSTRUCTIONS = """Health_Navigator 사용 지침 (에이전트용):
+
+1) 사용자가 증상을 이야기하면, 예상 질환·진료과를 예측하기 '전에' 먼저 이렇게
+   제안하세요: "복용 중인 약과 진단받은 병(고혈압·당뇨 등)을 알려주시면, 그걸
+   반영해 더 정확하고 안전하게 안내해 드릴 수 있어요. 말씀해 주시거나, '나의건강기록'
+   앱/정부24에서 복사한 내역을 붙여넣어 주셔도 됩니다." — 파일 업로드가 아니라
+   '텍스트'면 충분하며(한 문장이라도 가능), 사용자가 원치 않으면 그대로 진행합니다.
+2) 사용자가 복용약·기저질환을 텍스트로 주면(정식 내보내기든, 붙여넣기든, 기억나는
+   대로 친 한 문장이든) 먼저 import_health_record 를 호출해 프로파일을 만들고,
+   반환된 [PROFILE] 한 줄 요약을 predict_conditions 와 generate_clinician_handoff 의
+   profile 인자로 그대로 전달하세요.
+3) 표준 흐름: (건강기록 있으면) import_health_record → intake_questions 로 문진 →
+   structure_intake → predict_conditions(profile=...) → find_nearby_hospital /
+   self_care_guidance → generate_clinician_handoff.
+4) 의식저하·심한 출혈·갑작스러운 마비나 언어장애·심한 흉통·호흡곤란 등 위급 신호가
+   보이면 문진·예측보다 먼저 즉시 119·응급실을 안내하세요.
+5) 모든 안내는 일반 참고용이며 의학적 확정 진단이 아닙니다. 개인 건강기록은 응답
+   생성에만 쓰고 저장하지 않습니다."""
+
+mcp = FastMCP("Health_Navigator", host="0.0.0.0", port=PORT,
+              instructions=AGENT_INSTRUCTIONS)
 
 SAFETY = kb.SAFETY
 
@@ -221,6 +245,12 @@ def intake_questions(complaint: str) -> str:
 
     위험징후(red_flags)가 환자 답변에서 확인되면 문진을 계속 끌지 말고 즉시
     응급실 방문/119를 안내하세요.
+
+    [먼저 제안할 것] 문진을 시작하면서, 사용자에게 복용 중인 약과 진단받은 병
+    (고혈압·당뇨 등)을 알려주면 더 정확히 안내할 수 있다고 말하고, 말로 알려주거나
+    '나의건강기록' 앱/정부24에서 복사한 내역을 붙여넣도록 권하세요(파일 업로드가
+    아니라 텍스트면 충분, 한 문장도 가능). 내용을 주면 import_health_record 를 먼저
+    호출하고, 그 [PROFILE]을 이후 predict_conditions 에 넘기세요.
 
     Args:
         complaint: 환자의 주호소 발화 (예: "까만 변을 봐요", "가슴이 터질 것 같아요")

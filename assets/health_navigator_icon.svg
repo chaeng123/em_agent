@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E63E6"/>
+      <stop offset="1" stop-color="#0FB5A6"/>
+    </linearGradient>
+    <linearGradient id="heart" x1="196" y1="134" x2="316" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2E74F0"/>
+      <stop offset="1" stop-color="#12B3A6"/>
+    </linearGradient>
+    <filter id="pinShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#053A5B" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- subtle route path: navigate toward care -->
+  <path d="M92 452 C 150 452 182 430 212 402" fill="none" stroke="#FFFFFF" stroke-opacity="0.30"
+        stroke-width="9" stroke-linecap="round" stroke-dasharray="2 22"/>
+  <circle cx="92" cy="452" r="12" fill="#FFFFFF" fill-opacity="0.45"/>
+
+  <!-- location pin -->
+  <path d="M256 400 C 180 306 152 274 152 196 A 104 104 0 1 1 360 196 C 360 274 332 306 256 400 Z"
+        fill="#FFFFFF" filter="url(#pinShadow)"/>
+
+  <!-- heart + pulse (enlarged, centered in pin head) -->
+  <g transform="translate(256 232) scale(1.22) translate(-256 -185)">
+    <!-- heart inside pin -->
+    <path d="M256 236 C 232 208 196 196 196 166 C 196 146 214 134 232 134 C 244 134 252 142 256 150
+             C 260 142 268 134 280 134 C 298 134 316 146 316 166 C 316 196 280 208 256 236 Z"
+          fill="url(#heart)"/>
+    <!-- ECG pulse line across heart -->
+    <path d="M206 182 H236 L246 158 L258 206 L268 182 H306" fill="none" stroke="#FFFFFF"
+          stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
