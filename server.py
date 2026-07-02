@@ -6,10 +6,12 @@ Health_Navigator - MCP Server  [v4 범용 헬스 가이드형]
 질병관리청 국가건강정보포털과 연계(딥링크)해 제공하는 Agent.
 
 워크플로우 (단계별 툴):
+  0) import_health_record    : (선택) 사용자가 내보낸 진료·투약 기록 → 개인 프로파일
   1) structure_intake        : 초진 기록을 표준 양식으로 정리
-  2) predict_conditions      : 예상 질환(감별) + 담당 진료과 + 권장 진료 시급성
+  2) predict_conditions      : 예상 질환(감별) + 담당 진료과 + 시급성 (profile로 개인화)
   3) find_nearby_hospital    : 지역·진료과 기준 근처 병·의원 조회(공공데이터)
   4) self_care_guidance      : 병원 방문 전 일반 자가 처치 + 국가건강정보포털 공식 링크
+  5) generate_clinician_handoff : 진료 시 의사에게 보여줄 사전 초진 요약(인계용) 생성
 
 [중요] 일반적인 건강정보 안내용 참고 도구이며, 의학적 확정 진단이 아닙니다.
 [보안] 외부 API 인증키는 코드에 하드코딩하지 말고 환경변수로 주입하세요.
@@ -46,6 +48,62 @@ def _kdca_link(term: str) -> str:
     """국가건강정보포털 건강정보 검색 딥링크(출처표시용)."""
     q = urllib.parse.quote(term)
     return f"{KDCA_PORTAL}/healthinfo/biz/health/gnrlzHealthInfo/gnrlzHealthInfo/gnrlzHealthInfoView.do?searchValue={q}"
+
+
+# ===========================================================================
+# 툴 0) 개인 건강기록 불러오기 (파이프라인 진입점)
+# ===========================================================================
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="개인 건강기록 불러오기 (진료·투약 내역 반영)",
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False,
+    )
+)
+def import_health_record(record_text: str) -> str:
+    """Health_Navigator: 사용자가 '나의건강기록' 앱이나 정부24 등에서 직접 내보낸
+    본인의 진료·투약·건강검진 기록(텍스트/PDF에서 추출한 내용)을 받아, 복용약
+    계열·기저질환·주요 검사수치·알레르기를 추출한 '개인 건강 프로파일'을 만듭니다.
+
+    반환값의 [PROFILE] 한 줄 요약을 그대로 predict_conditions(profile=...) 와
+    generate_clinician_handoff(profile=...) 의 인자로 넘기면, 같은 증상이라도 이
+    사람의 약·기저질환을 반영해 시급성과 감별을 개인화합니다. 이것이 일반 증상
+    안내(예: 응급똑똑)와 구분되는 핵심 단계입니다.
+
+    [개인정보] 이 데이터는 서버에 저장되지 않으며 현재 세션에서만 사용됩니다.
+    사용자가 스스로 내보낸 본인 기록만 입력하세요.
+
+    Args:
+        record_text: 나의건강기록/정부24 등에서 내보낸 진료·투약·검진 기록 원문
+                     (예: "복용약: 와파린 5mg, 아스피린 100mg / 진단: 심방세동, 고혈압 ...")
+    """
+    flags = kb.parse_health_record(record_text)
+    summary = kb.format_profile(flags)
+
+    out = ["【개인 건강 프로파일 (요약)】", ""]
+    out.append("■ 기저질환/과거력: " +
+               (", ".join(flags["conditions"]) if flags["conditions"] else "추출 안 됨"))
+    out.append("■ 복용약 계열: " +
+               (", ".join(flags["medications"]) if flags["medications"] else "추출 안 됨"))
+    if flags["labs"]:
+        out.append("■ 주요 검사수치: " + ", ".join(flags["labs"]))
+    if flags["allergies"]:
+        out.append("■ 알레르기: " + "; ".join(flags["allergies"]))
+    if flags["raw_med_lines"]:
+        out.append("")
+        out.append("■ 인식된 약물 관련 기록:")
+        out += [f"  - {ln}" for ln in flags["raw_med_lines"]]
+
+    out += ["",
+            "■ [PROFILE] (다음 툴에 그대로 전달하세요):",
+            f"  {summary}",
+            "",
+            "→ predict_conditions(주호소, 증상, 과거력, profile=위 [PROFILE]) 로 "
+            "개인화된 예상 질환·시급성을 확인하고, generate_clinician_handoff 로 "
+            "진료 시 보여줄 초진 요약을 만들 수 있어요.",
+            "",
+            "ⓘ 입력하신 건강기록은 저장되지 않고 이 세션에서만 사용됩니다.",
+            "", SAFETY]
+    return "\n".join(out)
 
 
 # ===========================================================================
@@ -230,20 +288,35 @@ def predict_conditions(
     chief_complaint: str,
     symptoms: str = "",
     history: str = "",
+    profile: str = "",
 ) -> str:
     """Health_Navigator: 초진 소견(주호소·증상·과거력)을 내장 지식베이스와 대조해
     예상되는 질환 후보와 각 질환의 담당 진료과, 권장 진료 시급성을 안내합니다.
     확정 진단이 아니며, 근처 병원은 find_nearby_hospital, 방문 전 처치는
     self_care_guidance 툴로 이어서 확인하세요.
 
+    profile(개인 건강 프로파일)을 함께 넘기면 이 사람의 복용약·기저질환을 반영해
+    같은 증상이라도 시급성과 감별 순서를 개인화합니다(예: 항응고제 복용 중 흑색변
+    → 위장관 출혈 위험 상향, 심혈관 위험인자 보유자 흉통 → 협심증 우선 배제).
+    import_health_record 가 만들어 준 [PROFILE] 요약을 그대로 넣으면 됩니다.
+
     Args:
         chief_complaint: 주호소
         symptoms: 동반 증상
         history: 과거력
+        profile: 개인 건강 프로파일(복용약·기저질환 요약; import_health_record 결과)
     """
     combined = " ".join([chief_complaint, symptoms, history])
     emergency = kb.detect_emergency(combined)
     matched = kb.match_conditions(combined)
+
+    # --- 개인 건강기록 반영: 프로파일이 있으면 위험 가중 계산 ---
+    flags = kb.parse_health_record(profile) if profile and profile.strip() else None
+    # 프로파일 매칭에 증상 텍스트를 함께 넘겨 기저질환×증상 규칙을 평가
+    risk = kb.assess_risk(flags, combined) if flags else {"notes": [], "boosted": {}, "added": []}
+
+    def urgency_of(cid):
+        return risk["boosted"].get(cid, kb.CONDITIONS[cid]["urgency"])
 
     # --- 문진 요약: 환자가 말한 내용을 먼저 되짚어 줌 ---
     out = ["【문진 요약】"]
@@ -252,13 +325,30 @@ def predict_conditions(
         out.append(f"  - 함께 있는 증상: {symptoms}")
     if history:
         out.append(f"  - 과거력/복용약: {history}")
+    if flags:
+        out.append(f"  - 개인 건강기록: {profile.strip()}")
     out.append("")
+
+    # --- 개인 이력 반영 주의(위험 가중이 발동한 경우 최우선 안내) ---
+    if risk["notes"]:
+        out += ["【개인 건강기록 반영 — 주의】"]
+        out += [f"  ⚠️ {n}" for n in risk["notes"]]
+        out.append("")
 
     out += ["【예상 질환 및 담당 진료과 (참고용)】", ""]
     if emergency:
         out += [kb.EMERGENCY_GUIDANCE, ""]
 
-    if not matched:
+    # 재배열: (1) 매칭됐고 위험 가중된 질환 → (2) 그 외 매칭 질환 →
+    #   (3) 매칭 안 됐지만 위험 규칙이 추가한 질환. 주호소와 직접 맞는 후보가
+    #   부수적 주의 후보보다 아래로 밀리지 않도록 함.
+    matched_ids = [cid for cid, _ in matched]
+    boosted_in_matched = [c for c in matched_ids if c in risk["boosted"]]
+    rest_matched = [c for c in matched_ids if c not in risk["boosted"]]
+    added = [c for c in risk["added"] if c not in matched_ids]
+    ordered = boosted_in_matched + rest_matched + added
+
+    if not ordered:
         out += [
             "- 말씀하신 내용만으로는 특정 질환 패턴을 콕 집기 어려웠어요.",
             "- 증상을 조금 더 자세히 알려주시거나, 일반적으로는 가정의학과/내과에서 초기 진료가 가능합니다.",
@@ -266,12 +356,14 @@ def predict_conditions(
         ]
         return "\n".join(out)
 
-    # 가장 관련도 높은 후보를 한 줄 결론으로 먼저 제시
-    top = kb.CONDITIONS[matched[0][0]]
+    # 가장 관련도 높은(또는 위험 가중된) 후보를 한 줄 결론으로 먼저 제시
+    top_id = ordered[0]
+    top = kb.CONDITIONS[top_id]
     top_dept = top["department"] + (f"(또는 {', '.join(top['alt_depts'])})" if top["alt_depts"] else "")
-    out.append(f"■ 가장 가능성 있는 방향: '{top['name']}'이(가) 의심되어 "
-               f"{top_dept} 진료를 권합니다.")
-    out.append(f"  - 권장 시급성: {kb.URGENCY_LABEL[top['urgency']]}")
+    boosted_tag = " (개인 이력 반영해 시급성 상향)" if top_id in risk["boosted"] else ""
+    out.append(f"■ 가장 주의해서 볼 방향: '{top['name']}'이(가) 의심되어 "
+               f"{top_dept} 진료를 권합니다.{boosted_tag}")
+    out.append(f"  - 권장 시급성: {kb.URGENCY_LABEL[urgency_of(top_id)]}")
     out.append(f"  - 그렇게 본 이유(뒷받침 소견): {', '.join(top['supporting'][:4])}")
     if top.get("extra_note"):
         out.append(f"  - 참고: {top['extra_note']}")
@@ -279,12 +371,13 @@ def predict_conditions(
 
     out.append("■ 그 외 함께 고려할 수 있는 후보:")
     primary_depts = [top["department"]]
-    others = matched[1:5]
+    others = ordered[1:5]
     if others:
-        for cid, hits in others:
+        for cid in others:
             c = kb.CONDITIONS[cid]
             depts = c["department"] + (f" (또는 {', '.join(c['alt_depts'])})" if c["alt_depts"] else "")
-            out.append(f"  • {c['name']} — {depts} / {kb.URGENCY_LABEL[c['urgency']]}")
+            tag = " ★개인 이력 반영" if cid in risk["boosted"] else ""
+            out.append(f"  • {c['name']} — {depts} / {kb.URGENCY_LABEL[urgency_of(cid)]}{tag}")
             if c["department"] not in primary_depts:
                 primary_depts.append(c["department"])
     else:
@@ -293,7 +386,8 @@ def predict_conditions(
     out += ["",
             f"■ 추천 진료과: {', '.join(primary_depts)}",
             "→ find_nearby_hospital(지역, 진료과)로 근처 병원을, "
-            "self_care_guidance(질환명)로 방문 전 처치를 확인하세요.",
+            "self_care_guidance(질환명)로 방문 전 처치를, "
+            "generate_clinician_handoff 로 진료 시 보여줄 초진 요약을 만드세요.",
             "", SAFETY]
     return "\n".join(out)
 
@@ -301,11 +395,20 @@ def predict_conditions(
 # ===========================================================================
 # 툴 3) 근처 병·의원 찾기 (공공데이터포털 - 병·의원 찾기 서비스)
 # ===========================================================================
-async def _fetch_text(url: str, params: dict):
-    """요청을 보내고 (status_code, 응답본문)을 반환. 상태코드 검사는 호출부에서."""
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        resp = await client.get(url, params=params)
-        return resp.status_code, resp.text
+async def _fetch_text(url: str, params: dict, attempts: int = 3):
+    """요청을 보내고 (status_code, 응답본문)을 반환. 상태코드 검사는 호출부에서.
+    공공 API 지연 대비: 타임아웃을 넉넉히 두고, 타임아웃/네트워크 오류 시 재시도."""
+    timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+    last_exc = None
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for i in range(attempts):
+            try:
+                resp = await client.get(url, params=params)
+                return resp.status_code, resp.text
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e  # 일시적 지연/네트워크 오류 → 재시도
+                continue
+    raise last_exc
 
 
 @mcp.tool(
@@ -468,6 +571,118 @@ def self_care_guidance(query: str) -> str:
         out.append("")
     out.append("ⓘ 자가 처치 안내는 국가건강정보포털 공개정보를 참고한 일반 안내이며, "
                "공식 콘텐츠 원문은 위 포털 링크에서 확인하세요(출처표시·비영리·변경금지).")
+    out.append("")
+    out.append(SAFETY)
+    return "\n".join(out)
+
+
+# ===========================================================================
+# 툴 5) 의료진 인계용 초진 요약 생성 (진료 전 문진표)
+# ===========================================================================
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="의료진 인계용 초진 요약 생성",
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False,
+    )
+)
+def generate_clinician_handoff(
+    chief_complaint: str,
+    onset: str = "",
+    symptoms: str = "",
+    ros: str = "",
+    history: str = "",
+    medications: str = "",
+    allergies: str = "",
+    vital_signs: str = "",
+    profile: str = "",
+    assessment: str = "",
+    department: str = "",
+    urgency: str = "",
+    plan: str = "",
+) -> str:
+    """Health_Navigator: 지금까지 모은 문진 내용과 개인 건강기록(profile)을 합쳐,
+    환자가 '진료 시 의사에게 그대로 보여줄 수 있는' 한 장짜리 사전 초진 요약(문진표)을
+    만듭니다. 환자용 안내가 아니라 의료진 인계용 산출물이라는 점이 일반 증상 안내와
+    구분되는 지점입니다. 환자 진술과 본인 제공 기록에 기반하며 확정 진단이 아닙니다.
+
+    profile 에는 import_health_record 가 만든 [PROFILE] 요약을, assessment/department/
+    urgency 에는 predict_conditions 결과를 넣으면 자동으로 반영됩니다.
+
+    Args:
+        chief_complaint: 주호소
+        onset: 발병 양상/현병력(HPI)
+        symptoms: 동반 증상
+        ros: 계통 문진(ROS)
+        history: 과거력(문진으로 확인한 내용)
+        medications: 문진으로 확인한 복용약
+        allergies: 알레르기
+        vital_signs: 활력징후(측정된 경우)
+        profile: 개인 건강 프로파일(import_health_record 결과 [PROFILE])
+        assessment: 예상 질환/감별(predict_conditions 결과)
+        department: 권장 진료과
+        urgency: 권장 시급성
+        plan: 계획/권고
+    """
+    flags = kb.parse_health_record(profile) if profile and profile.strip() else None
+
+    # 문진으로 받은 값과 개인기록에서 추출한 값을 합쳐 보여줌(중복은 자연스럽게 병기)
+    rec_conditions = ", ".join(flags["conditions"]) if flags and flags["conditions"] else ""
+    rec_meds = ", ".join(flags["medications"]) if flags and flags["medications"] else ""
+    rec_labs = ", ".join(flags["labs"]) if flags and flags["labs"] else ""
+    rec_allergy = "; ".join(flags["allergies"]) if flags and flags["allergies"] else ""
+
+    line = "─" * 44
+    out = [line,
+           "  사전 초진 요약 (환자 제공 · 의료진 인계용)",
+           "  생성: Health_Navigator (참고용, 확정 진단 아님)",
+           line, ""]
+
+    out.append("■ 주호소 (C.C.)")
+    out.append(f"  {chief_complaint}")
+    if urgency:
+        out.append(f"  권장 시급성: {urgency}")
+    if department:
+        out.append(f"  권장 진료과: {department}")
+    out.append("")
+
+    out.append("■ 현병력 (HPI) / 동반 증상")
+    out.append(f"  - 발병·경과: {onset or '기재 없음'}")
+    if symptoms:
+        out.append(f"  - 동반 증상: {symptoms}")
+    if ros:
+        out.append(f"  - 계통 문진(ROS): {ros}")
+    out.append("")
+
+    out.append("■ 과거력·복용약 (환자 진술 + 본인 제공 건강기록)")
+    hx = history or ""
+    if rec_conditions:
+        hx = (hx + f" / [기록] 기저질환: {rec_conditions}").strip(" /")
+    out.append(f"  - 과거력: {hx or '기재 없음'}")
+    md = medications or ""
+    if rec_meds:
+        md = (md + f" / [기록] 복용약 계열: {rec_meds}").strip(" /")
+    out.append(f"  - 복용약: {md or '기재 없음'}")
+    out.append(f"  - 알레르기: {allergies or rec_allergy or '특이사항 없음/미상'}")
+    if rec_labs:
+        out.append(f"  - 최근 검사수치(기록): {rec_labs}")
+    out.append("")
+
+    out.append("■ 활력징후 (V/S)")
+    out.append(f"  {vital_signs or '미측정'}")
+    out.append("")
+
+    out.append("■ 사정 (A) — 예상 질환/감별 (참고)")
+    out.append(f"  {assessment or '(predict_conditions 결과 입력)'}")
+    out.append("")
+
+    out.append("■ 계획/권고 (P)")
+    out.append(f"  {plan or '의료진 판단에 따름'}")
+    out.append("")
+
+    out.append(line)
+    out.append("ⓘ 본 요약은 환자 진술과 환자 본인이 제공한 건강기록에 기반한 참고 "
+               "자료이며, 의학적 확정 진단이 아닙니다. 최종 판단은 진료 의료진에 따릅니다.")
+    out.append("ⓘ 개인 건강기록은 이 요약 생성에만 사용되며 서버에 저장되지 않습니다.")
     out.append("")
     out.append(SAFETY)
     return "\n".join(out)

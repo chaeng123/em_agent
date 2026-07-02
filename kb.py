@@ -631,3 +631,207 @@ def match_conditions(text: str):
             scored.append((len(hits), urg, cid, hits))
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return [(cid, hits) for _, _, cid, hits in scored]
+
+
+# ===========================================================================
+# 개인 건강기록(진료·투약·검진 내역) 기반 개인화 — v5
+#   나의건강기록/정부24 등에서 사용자가 '직접 내보낸' 진료·투약·검진 기록
+#   텍스트를 파싱해 복용약 계열·기저질환·검사수치·알레르기를 추출하고
+#   (parse_health_record), 그 개인 맥락으로 예상 질환의 시급성과 감별 순서를
+#   보정합니다(assess_risk).
+#   [보안] 파싱 결과는 서버에 저장하지 않으며, 호출 세션 내에서만 사용됩니다.
+#   [원칙] 응급똑똑 등 일반 트리아지와 달리 '이 사람의 약·기저질환'을 반영해
+#          같은 증상이라도 더/덜 시급하게 판단하는 것이 핵심 차별점입니다.
+# ===========================================================================
+import re
+
+# 위험 가중에 쓰는 약물 계열 (라벨 → 매칭 키워드; 한글/영문·상품명 포함)
+MED_CLASSES = {
+    "항응고/항혈소판제": ["와파린", "warfarin", "쿠마딘", "아스피린", "aspirin",
+                    "클로피도그렐", "clopidogrel", "플라빅스", "리바록사반", "자렐토",
+                    "아픽사반", "엘리퀴스", "에독사반", "릭시아나", "다비가트란",
+                    "프라닥사", "noac", "doac", "항응고", "항혈소판"],
+    "소염진통제(NSAID)": ["이부프로펜", "ibuprofen", "나프록센", "naproxen", "디클로페낙",
+                     "아세클로페낙", "세레콕시브", "멜록시캄", "nsaid", "소염진통", "진통소염"],
+    "스테로이드": ["스테로이드", "프레드니솔론", "prednisolone", "프레드니손",
+               "덱사메타손", "dexamethasone", "steroid"],
+    "당뇨약/인슐린": ["인슐린", "insulin", "메트포르민", "metformin", "글리메피리드",
+                 "다파글리플로진", "자디앙", "포시가", "sglt", "dpp-4", "당뇨약", "혈당강하"],
+    "항암제": ["항암", "chemo", "표적치료", "면역항암"],
+    "면역억제제": ["면역억제", "타크로리무스", "tacrolimus", "사이클로스포린", "이식 후"],
+    "혈압약": ["혈압약", "암로디핀", "amlodipine", "로사르탄", "텔미사르탄", "베타차단"],
+    "고지혈증약(스타틴)": ["스타틴", "statin", "아토르바", "로수바", "심바스타틴"],
+}
+
+# 기저질환/과거력 (라벨 → 매칭 키워드)
+CHRONIC_CONDITIONS = {
+    "고혈압": ["고혈압", "hypertension", "htn"],
+    "당뇨병": ["당뇨", "diabetes", "dm"],
+    "고지혈증": ["고지혈", "이상지질", "dyslipid", "고콜레스테롤"],
+    "심방세동/부정맥": ["심방세동", "atrial fib", "부정맥", "arrhythmia"],
+    "관상동맥질환": ["협심증", "심근경색", "관상동맥", "스텐트", "angina"],
+    "만성콩팥병": ["만성콩팥", "만성신장", "ckd", "투석", "신부전"],
+    "간질환": ["간경변", "간경화", "cirrhosis", "b형간염", "c형간염"],
+    "호흡기질환": ["천식", "copd", "만성폐쇄", "기관지확장", "간질성폐"],
+    "암/종양": ["종양", "cancer", "carcinoma", "악성종양", "항암", "위암", "폐암",
+             "간암", "대장암", "유방암", "췌장암", "전립선암", "갑상선암",
+             "혈액암", "림프종", "백혈병", "선암"],
+    "면역저하": ["면역저하", "장기이식", "호중구감소"],
+}
+
+
+def parse_health_record(text: str) -> dict:
+    """사용자가 내보낸 진료·투약·검진 기록 텍스트에서 복용약 계열, 기저질환,
+    주요 검사수치, 알레르기를 추출합니다. export 형식이 제각각이어도 처리하도록
+    키워드/정규식 기반으로 관대하게 파싱합니다.
+    반환: {medications, conditions, labs, allergies, raw_med_lines}"""
+    empty = {"medications": [], "conditions": [], "labs": [],
+             "allergies": [], "raw_med_lines": []}
+    if not text or not text.strip():
+        return empty
+    t = text.lower()
+
+    meds = [label for label, kws in MED_CLASSES.items()
+            if any(kw.lower() in t for kw in kws)]
+    conditions = [label for label, kws in CHRONIC_CONDITIONS.items()
+                  if any(kw.lower() in t for kw in kws)]
+
+    # 주요 검사 수치(있으면) — 혈압/공복혈당/당화혈색소/LDL
+    labs = []
+    for pat, name in [
+        (r"(\d{2,3})\s*/\s*(\d{2,3})\s*mmhg", "혈압"),
+        (r"(?:공복\s*)?혈당[^\d]{0,6}(\d{2,3})", "공복혈당"),
+        (r"(?:hba1c|당화혈색소)[^\n]{0,12}?(\d{1,2}\.\d)", "당화혈색소(HbA1c)"),
+        (r"ldl[^\d]{0,6}(\d{2,3})", "LDL 콜레스테롤"),
+    ]:
+        m = re.search(pat, t)
+        if m:
+            labs.append(f"{name} {'/'.join(m.groups())}")
+
+    # 알레르기: "알레르기:" 인라인 값 또는 "[알레르기]" 헤더 다음 불릿을 추출.
+    #   요약 문자열 재파싱 시 통째로 삼키지 않도록(|·과장된 길이) 방어적으로 정제.
+    def _clean_allergy(v):
+        v = v.strip().lstrip("-•").strip()
+        if not v or "|" in v or len(v) > 40:
+            return None
+        if any(x in v for x in ["복용약", "검사수치", "기저질환"]):
+            return None
+        return v
+
+    allergies = []
+    _lines = text.splitlines()
+    for i, line in enumerate(_lines):
+        low = line.lower()
+        if "알레르기" in line or "allerg" in low:
+            if ":" in line:
+                v = _clean_allergy(line.split(":", 1)[1])
+                if v:
+                    allergies.append(v)
+                    continue
+            for nxt in _lines[i + 1:]:  # 헤더형 → 다음 불릿들
+                s = nxt.strip()
+                if not s or s.startswith("[") or s.startswith("="):
+                    break
+                c = _clean_allergy(s)
+                if c:
+                    allergies.append(c)
+    allergies = list(dict.fromkeys(allergies))
+
+    # 약으로 보이는 원문 라인(정보 보존용)
+    raw_med_lines = [ln.strip() for ln in text.splitlines()
+                     if any(kw in ln for kws in MED_CLASSES.values()
+                            for kw in kws if len(kw) >= 2 and not kw.isascii())][:12]
+
+    return {"medications": meds, "conditions": conditions, "labs": labs,
+            "allergies": allergies, "raw_med_lines": raw_med_lines}
+
+
+def format_profile(flags: dict) -> str:
+    """파싱된 개인 건강정보를 한 줄 요약 문자열로 만든다(다운스트림 툴 전달용)."""
+    parts = []
+    if flags.get("conditions"):
+        parts.append("기저질환: " + ", ".join(flags["conditions"]))
+    if flags.get("medications"):
+        parts.append("복용약 계열: " + ", ".join(flags["medications"]))
+    if flags.get("labs"):
+        parts.append("검사수치: " + ", ".join(flags["labs"]))
+    if flags.get("allergies"):
+        parts.append("알레르기: " + "; ".join(flags["allergies"]))
+    return " | ".join(parts) if parts else "(추출된 개인 건강정보 없음)"
+
+
+# 개인 이력 × 증상 → 시급성 상향 규칙
+#   meds/conditions 중 하나라도 있고, symptoms 중 하나라도 있으면 발동.
+#   boost 질환을 감별 앞으로 올리고 urgency를 escalate로 상향, note를 안내.
+RISK_RULES = [
+    {
+        "id": "anticoag_gi_bleed",
+        "meds": ["항응고/항혈소판제", "소염진통제(NSAID)", "스테로이드"],
+        "conditions": [],
+        "symptoms": ["흑색변", "검은 변", "까만 변", "혈변", "변에 피", "토혈",
+                     "melena", "하혈", "속쓰림", "명치"],
+        "boost": "gi_bleeding", "escalate": "urgent",
+        "note": "복용 중인 항응고·항혈소판제/소염진통제/스테로이드는 위장관 출혈 위험과 "
+                "출혈량을 키울 수 있어요. 흑색변·혈변·토혈은 더 시급하게 보고 지체 없이 "
+                "진료가 필요합니다.",
+    },
+    {
+        "id": "cardiac_rf_chest_pain",
+        "meds": [],
+        "conditions": ["고혈압", "당뇨병", "고지혈증", "관상동맥질환", "심방세동/부정맥"],
+        "symptoms": ["가슴", "흉통", "압박", "조이", "답답", "숨이 차"],
+        "boost": "chest_pain", "escalate": "urgent",
+        "note": "고혈압·당뇨·고지혈증·심장질환 등 심혈관 위험인자가 있으면 흉통·가슴 "
+                "답답함은 협심증/심근경색 가능성을 먼저 배제해야 해서 더 시급합니다.",
+    },
+    {
+        "id": "chemo_neutropenic_fever",
+        "meds": ["항암제", "면역억제제"],
+        "conditions": ["암/종양", "면역저하"],
+        "symptoms": ["열", "발열", "고열", "오한", "춥고 떨"],
+        "boost": "febrile_infection", "escalate": "urgent",
+        "note": "최근 항암치료나 면역저하 상태라면 호중구감소성 발열 위험이 있어, 발열은 "
+                "자가관리 대상이 아니라 지체 없이 응급실 진료가 필요합니다.",
+    },
+    {
+        "id": "diabetes_infection",
+        "meds": ["당뇨약/인슐린"],
+        "conditions": ["당뇨병", "만성콩팥병"],
+        "symptoms": ["열", "발열", "고열", "소변", "배뇨", "상처", "붓"],
+        "boost": "febrile_infection", "escalate": "prompt",
+        "note": "당뇨·만성콩팥병이 있으면 감염이 빠르게 악화되고 잘 낫지 않을 수 있어, "
+                "발열·요로감염·상처 감염은 더 빨리 진료받는 게 좋습니다.",
+    },
+    {
+        "id": "af_stroke_watch",
+        "meds": ["항응고/항혈소판제"],
+        "conditions": ["심방세동/부정맥", "관상동맥질환"],
+        "symptoms": ["어지", "핑 돌", "말이", "한쪽", "저림", "두통", "실신"],
+        "boost": "headache_danger", "escalate": "urgent",
+        "note": "심방세동 등 부정맥이 있으면 갑작스러운 어지럼·편측 위약·언어장애는 뇌졸중 "
+                "신호일 수 있어 즉시 응급실 평가가 필요합니다.",
+    },
+]
+
+
+def assess_risk(flags: dict, symptom_text: str) -> dict:
+    """파싱된 개인 건강정보(flags)와 현재 증상 텍스트를 대조해, 시급성을 높여야
+    하는 개인화 위험을 반환한다.
+    반환: {notes:[...], boosted:{condition_id: urgency}, added:[condition_id]}"""
+    notes, boosted, added = [], {}, []
+    if not flags:
+        return {"notes": notes, "boosted": boosted, "added": added}
+    meds = set(flags.get("medications", []))
+    conds = set(flags.get("conditions", []))
+    text = symptom_text or ""
+    matched_ids = [c for c, _ in match_conditions(text)]
+    for rule in RISK_RULES:
+        has_factor = bool(set(rule["meds"]) & meds) or bool(set(rule["conditions"]) & conds)
+        has_symptom = any(s in text for s in rule["symptoms"])
+        if has_factor and has_symptom:
+            notes.append(rule["note"])
+            cid = rule["boost"]
+            boosted[cid] = rule["escalate"]
+            if cid not in matched_ids and cid not in added:
+                added.append(cid)
+    return {"notes": notes, "boosted": boosted, "added": added}
