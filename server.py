@@ -91,7 +91,7 @@ def _kdca_link(term: str) -> str:
     )
 )
 def import_health_record(record_text: str) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 사용자가 '나의건강기록' 앱이나 정부24 등에서 직접 내보낸
+    """Health_Navigator [v5.4 (2026-07-02)]: 사용자가 '나의건강기록' 앱이나 정부24 등에서 직접 내보낸
     본인의 진료·투약·건강검진 기록(텍스트/PDF에서 추출한 내용)을 받아, 복용약
     계열·기저질환·주요 검사수치·알레르기를 추출한 '개인 건강 프로파일'을 만듭니다.
 
@@ -159,7 +159,7 @@ def structure_intake(
     assessment: str = "",
     plan: str = "",
 ) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 인턴의 ER 초진 기록을 받아 표준 초진일지 양식
+    """Health_Navigator [v5.4 (2026-07-02)]: 인턴의 ER 초진 기록을 받아 표준 초진일지 양식
     (SOAP 기반 + ROS / PE / Assessment(r/o) / Plan)으로 정리해 반환합니다.
     이후 predict_conditions / find_nearby_hospital / self_care_guidance 툴의
     입력으로 사용할 수 있습니다. 진단이 아닌 기록 정리 단계입니다.
@@ -244,7 +244,7 @@ def structure_intake(
     )
 )
 def intake_questions(complaint: str) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 환자가 증상(주호소)을 말하면, 그 주호소에 맞춰 환자에게
+    """Health_Navigator [v5.4 (2026-07-02)]: 환자가 증상(주호소)을 말하면, 그 주호소에 맞춰 환자에게
     물어봐야 할 문진 질문 목록을 돌려줍니다. structure_intake로 기록을 정리하기
     '전' 단계에서 사용하세요. 반환된 질문을 환자에게 한 번에 1~2개씩 자연스럽게
     물어 답을 모은 뒤 structure_intake의 각 슬롯(onset/symptoms/ros/history 등)에
@@ -332,7 +332,7 @@ def predict_conditions(
     history: str = "",
     profile: str = "",
 ) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 초진 소견(주호소·증상·과거력)을 내장 지식베이스와 대조해
+    """Health_Navigator [v5.4 (2026-07-02)]: 초진 소견(주호소·증상·과거력)을 내장 지식베이스와 대조해
     예상되는 질환 후보와 각 질환의 담당 진료과, 권장 진료 시급성을 안내합니다.
     확정 진단이 아니며, 근처 병원은 find_nearby_hospital, 방문 전 처치는
     self_care_guidance 툴로 이어서 확인하세요.
@@ -438,10 +438,21 @@ def predict_conditions(
 # ===========================================================================
 # 툴 3) 근처 병·의원 찾기 (공공데이터포털 - 병·의원 찾기 서비스)
 # ===========================================================================
-async def _fetch_text(url: str, params: dict, attempts: int = 3):
+# 공공데이터 API가 지연/오류일 때 사용자에게 보여줄 '상태 메시지'.
+#   → 서비스 자체 오류나 '병원 없음'이 아니라, 공공 API 쪽 일시적 문제임을 명확히 안내.
+def _api_unstable_msg(detail: str = "") -> str:
+    d = f"\n  (참고 정보: {detail})" if detail else ""
+    return ("⏳ 지금 병원 찾기에 쓰는 공공데이터 API(국립중앙의료원 병·의원 찾기 서비스)의 "
+            "응답이 지연되거나 일시적으로 불안정한 상태예요.\n"
+            "  이 서비스나 검색 자체의 오류가 아니라 공공데이터 포털 쪽 상태 문제일 수 "
+            "있으니, 잠시 후 다시 시도해 주세요." + d + "\n\n" + SAFETY)
+
+
+async def _fetch_text(url: str, params: dict, attempts: int = 2):
     """요청을 보내고 (status_code, 응답본문)을 반환. 상태코드 검사는 호출부에서.
-    공공 API 지연 대비: 타임아웃을 넉넉히 두고, 타임아웃/네트워크 오류 시 재시도."""
-    timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=5.0)
+    공공 API가 느릴 때 호스트 타임아웃 전에 빠르게 상태를 돌려주도록 read 타임아웃을
+    짧게(8s) 잡고 1회 재시도. 모두 실패하면 마지막 예외를 올린다(호출부에서 상태 메시지)."""
+    timeout = httpx.Timeout(connect=4.0, read=8.0, write=8.0, pool=4.0)
     last_exc = None
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for i in range(attempts):
@@ -465,7 +476,7 @@ async def find_nearby_hospital(
     sigungu: str,
     department: str = "",
 ) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 지정한 지역(시도/시군구)에서 진료과 기준으로 근처 병·의원을
+    """Health_Navigator [v5.4 (2026-07-02)]: 지정한 지역(시도/시군구)에서 진료과 기준으로 근처 병·의원을
     국립중앙의료원 공공데이터(병·의원 찾기 서비스)로 조회합니다. department를 지정하면
     해당 진료과로 필터링합니다. 실시간 공공데이터이므로 호출 시점에 따라 결과가 달라질
     수 있습니다.
@@ -474,6 +485,10 @@ async def find_nearby_hospital(
     소화기내과·심장내과 같은 세부 분과나 '정신과'·'비뇨기과' 같은 구명칭을 넣으면
     상위 표준 진료과로 자동 변환됩니다. 변환할 수 없는 이름이면 지원 진료과 목록을
     안내하며, 진료과 없이 호출하면 지역 내 병·의원 전체를 조회합니다.
+
+    [응답 안내] 공공데이터 API가 지연·과부하·오류일 때는 실패로 뭉뚱그리지 않고
+    "공공데이터 API가 일시적으로 불안정하니 잠시 후 재시도하세요"라는 상태 메시지를
+    돌려줍니다. 조건에 맞는 병원이 없을 때(정상 응답+빈 결과)는 이와 구분해 안내합니다.
 
     Args:
         sido: 시도 (예: "서울특별시")
@@ -501,36 +516,38 @@ async def find_nearby_hospital(
         dept_canon, dept_code = resolved
         params["QD"] = dept_code
 
+    # 타임아웃/네트워크 오류 → '공공 API 일시 불안정' 상태 메시지 (오류로 뭉뚱그리지 않음)
     try:
         status, body = await _fetch_text(f"{HOSP_BASE}/getHsptlMdcncListInfoInqire", params)
     except Exception as e:
-        # str(e)가 비어 있는 예외도 있어 type/repr까지 노출해 진단을 돕는다
-        return f"  (병원 조회 연결 오류: {type(e).__name__}: {e!r})\n\n{SAFETY}"
+        return _api_unstable_msg(f"응답 지연/네트워크 오류 {type(e).__name__}")
 
-    # HTTP 상태 비정상이면 본문 일부를 함께 보여 원인 파악을 돕는다
+    # HTTP 상태 비정상 → 대개 공공 API 서버 과부하/점검. 상태 메시지로 안내.
     if status != 200:
-        snippet = (body or "").strip().replace("\n", " ")[:300]
-        return f"  (병원 API HTTP {status} 응답)\n  본문: {snippet}\n\n{SAFETY}"
+        return _api_unstable_msg(f"공공 API 응답 코드 HTTP {status}")
 
-    # XML 파싱 시도 — 실패하면 본문 일부 노출(데이터포털은 인증오류를 본문에 담아줌)
+    # XML 파싱 실패 → 데이터포털이 과부하 시 HTML 오류 페이지를 주는 경우. 상태 메시지로 안내.
     try:
         root = ET.fromstring(body)
-    except ET.ParseError as e:
-        snippet = (body or "").strip().replace("\n", " ")[:300]
-        return (f"  (병원 API 응답 파싱 실패: {e})\n  본문: {snippet}\n\n{SAFETY}")
+    except ET.ParseError:
+        return _api_unstable_msg("공공 API가 정상 형식이 아닌 응답을 반환")
 
-    # 데이터포털 인증/오류 메시지(returnAuthMsg / returnReasonCode / resultMsg) 처리
+    # 데이터포털 인증/키 오류: 이건 일시 문제가 아니라 설정 문제이므로 구분해 안내.
     auth_msg = root.findtext(".//returnAuthMsg")
     reason = root.findtext(".//returnReasonCode")
     if auth_msg or (reason and reason not in ("00", "0")):
-        return (f"  (병원 API 인증/요청 오류: {auth_msg or ''} "
-                f"코드 {reason or '?'})\n"
+        # 트래픽 초과(22) 등 '일시적' 코드면 상태 메시지로, 그 외 키 문제는 설정 안내로.
+        transient = {"22", "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR"}
+        if (auth_msg in transient) or (reason in transient):
+            return _api_unstable_msg("공공 API 일시 호출 한도 초과(잠시 후 재시도)")
+        return (f"  (병원 API 인증/요청 오류: {auth_msg or ''} 코드 {reason or '?'})\n"
                 f"  → data.go.kr에서 해당 서비스 활용신청 승인·키 종류(Decoding) 확인 필요\n\n{SAFETY}")
 
     code = root.findtext(".//resultCode")
     if code and code != "00":
         msg = root.findtext(".//resultMsg") or ""
-        return f"  (병원 API 오류 코드 {code} {msg})\n\n{SAFETY}"
+        # 00 이외 코드는 대체로 공공 API 측 처리 오류 → 상태 메시지로 안내.
+        return _api_unstable_msg(f"공공 API 처리 코드 {code} {msg}".strip())
 
     # 입력이 정규화됐으면(예: 소화기내과→내과) 라벨에 그 사실을 표시
     if dept_canon and department.strip() != dept_canon:
@@ -541,8 +558,10 @@ async def find_nearby_hospital(
 
     items = root.findall(".//item")
     if not items:
-        return (f"  ('{sido} {sigungu}{dept_label}' 조건의 병·의원 조회 결과 없음)\n"
-                f"  (진료과를 바꾸거나 지역을 넓혀 다시 시도하세요.)\n\n{SAFETY}")
+        # 공공 API는 정상 응답했으나 조건에 맞는 병원이 없는 '진짜 빈 결과'. (오류 아님)
+        return (f"ℹ️ '{sido} {sigungu}{dept_label}' 조건으로는 등록된 병·의원이 조회되지 "
+                f"않았어요. (공공 API는 정상 응답했고, 이 조건에 해당하는 결과만 없는 상태예요)\n"
+                f"  진료과를 바꾸거나 지역 범위를 넓혀 다시 시도해 보세요.\n\n{SAFETY}")
 
     out = [f"【근처 병·의원 — {sido} {sigungu}{dept_label}】"]
     for it in items[:7]:
@@ -568,7 +587,7 @@ async def find_nearby_hospital(
     )
 )
 def self_care_guidance(query: str) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 질환명 또는 증상을 입력하면, 병원 방문 전 시행할 수 있는
+    """Health_Navigator [v5.4 (2026-07-02)]: 질환명 또는 증상을 입력하면, 병원 방문 전 시행할 수 있는
     일반적인 자가 처치 안내와 주의할 위험징후를 제공하고, 해당 질환의 질병관리청
     국가건강정보포털 공식 콘텐츠 링크(출처표시)를 함께 안내합니다. 처치 안내는 일반
     참고용이며, 공식 원문은 제공된 포털 링크에서 확인하세요.
@@ -643,7 +662,7 @@ def generate_clinician_handoff(
     urgency: str = "",
     plan: str = "",
 ) -> str:
-    """Health_Navigator [v5.3 (2026-07-02)]: 지금까지 모은 문진 내용과 개인 건강기록(profile)을 합쳐,
+    """Health_Navigator [v5.4 (2026-07-02)]: 지금까지 모은 문진 내용과 개인 건강기록(profile)을 합쳐,
     환자가 '진료 시 의사에게 그대로 보여줄 수 있는' 한 장짜리 사전 초진 요약(문진표)을
     만듭니다. 환자용 안내가 아니라 의료진 인계용 산출물이라는 점이 일반 증상 안내와
     구분되는 지점입니다. 환자 진술과 본인 제공 기록에 기반하며 확정 진단이 아닙니다.
