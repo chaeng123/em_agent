@@ -159,45 +159,28 @@ def structure_intake(
     assessment: str = "",
     plan: str = "",
 ) -> str:
-    """Health_Navigator [v5.4 (2026-07-02)]: 인턴의 ER 초진 기록을 받아 표준 초진일지 양식
-    (SOAP 기반 + ROS / PE / Assessment(r/o) / Plan)으로 정리해 반환합니다.
-    이후 predict_conditions / find_nearby_hospital / self_care_guidance 툴의
-    입력으로 사용할 수 있습니다. 진단이 아닌 기록 정리 단계입니다.
+    """Health_Navigator [v5.4 (2026-07-02)]: 초진 기록을 표준 초진일지(SOAP + ROS/PE/
+    Assessment(r/o)/Plan)로 정리해 반환합니다. 결과는 predict_conditions /
+    find_nearby_hospital / self_care_guidance 의 입력으로 쓸 수 있어요. 진단이 아닌
+    기록 정리 단계이며, 비어 있는 항목은 생략됩니다.
 
-    S(주관적)는 C.C./HPI(PI)/동반증상/ROS/과거력(PHX)/약물/알레르기,
-    O(객관적)는 활력징후/신체검진(PE), A는 사정(r/o 감별), P는 계획(w/u·tx)으로
-    배치합니다. 비어 있는 항목은 출력에서 생략됩니다.
-
-    [환자 문진 모드 — 호출 전 반드시 따를 것]
-    환자가 증상 한두 마디만 보냈을 때, 비어 있는 항목을 추측하거나 임의로
-    채우지 말고 환자에게 먼저 질문해 채운 뒤 이 툴을 호출하세요. 질문은 환자가
-    부담스럽지 않게 한 번에 1~2개씩 자연스러운 말로 묻습니다.
-      1) HPI(onset): 언제부터/얼마나 자주/갑자기 vs 서서히/악화·완화 요인.
-         주호소의 성상(예: 변 색·양·횟수, 통증 부위·강도·방사 등).
-      2) 동반 증상 / ROS: 주호소와 연관된 위험 증상 위주로 확인.
-         예) 까만 변·혈변 → 어지러움·실신·식은땀, 토혈, 복통, 체중감소,
-             평소 빈혈·소화불량, NSAID/항응고제 복용, 최근 음주.
-         예) 흉통 → 호흡곤란·식은땀·방사통·실신, 운동 시 악화.
-         예) 발열 → 오한, 기침·가래, 배뇨증상, 복통, 최근 항암/수술.
-      3) PHX(history): 기저질환, 수술·시술력, 최근 입원, 추적 중인 과.
-      4) medications / allergies: 복용 약(특히 항응고·항혈소판·NSAID·인슐린),
-         약물 알레르기.
-      5) vital_signs: 측정값이 있으면 입력(없으면 '미측정').
-    위험징후(다량 출혈, 실신, 의식저하, 심한 흉통/호흡곤란 등)가 있으면
-    문진을 끌지 말고 즉시 응급실 방문을 안내하세요.
+    [문진 우선] 환자가 증상을 한두 마디만 말했으면 빈 항목을 임의로 채우지 말고,
+    intake_questions 로 물을 것을 확인해 한 번에 1~2개씩 자연스럽게 물어 답을 채운 뒤
+    호출하세요. 위험징후(다량 출혈·실신·의식저하·심한 흉통/호흡곤란 등)가 있으면 문진을
+    끌지 말고 즉시 응급실을 안내하세요.
 
     Args:
-        chief_complaint: 주호소 C.C. (예: "melena")
-        onset: 발병 양상/시각 / 현병력 PI (예: "내원 당일 7A30·9A melena 2회")
-        symptoms: 동반 증상 (예: "general weakness(+), dyspnea(-)")
-        history: 과거력 PHX / 현병력 배경 (예: "Pancreas head ca s/p Whipple's OP")
+        chief_complaint: 주호소(C.C.)
+        onset: 발병 양상/현병력(HPI)
+        symptoms: 동반 증상
+        history: 과거력(PHX)
         medications: 복용 약물
-        allergies: 알레르기 (예: "페니실린")
-        vital_signs: 활력징후 (예: "BP 99/64, HR 72, RR 16, BT 36")
-        ros: 계통 문진 ROS 체크 (예: "F/C(-/-) C/S/R(-/-/-) A/N/V/D/C(-/-/-/-/-)")
-        physical_exam: 신체검진 PE 소견 (예: "Anemic conjunctiva, Abd Td(+) epigastric, DRE 흑색변")
-        assessment: 사정/감별 진단 (예: "r/o marginal ulcer bleeding")
-        plan: 계획 (예: "CBC f/u, consider EGD")
+        allergies: 알레르기
+        vital_signs: 활력징후(없으면 '미측정')
+        ros: 계통 문진(ROS)
+        physical_exam: 신체검진(PE)
+        assessment: 사정/감별(r/o)
+        plan: 계획(w/u·tx)
     """
     lines = ["【초진일지 (정리본)】", "", "■ S (주관적):", f"  - 주호소(C.C.): {chief_complaint}"]
     if onset:
